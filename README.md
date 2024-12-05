@@ -1,0 +1,2 @@
+# WasteClassificationipynb
+ 
