@@ -1,27 +1,53 @@
 import cv2
 import time
+import threading
 from ultralytics import YOLO
 import gradio as gr
-import atexit
 
 # Load YOLOv8 model
 model = YOLO("yolov8n.pt")  # Replace with your model
 class_labels = ["Cardboard", "Glass", "Metal", "Paper", "Plastic", "Trash"]
 
-# Initialize webcam
+# Initialize global variables
 cap = cv2.VideoCapture(0)
+latest_frame = None
+stop_thread = False
+lock = threading.Lock()  # To synchronize access to `latest_frame`
 
-def capture_and_classify():
-    global cap
-    if not cap.isOpened():
-        cap = cv2.VideoCapture(0)  # Reopen the webcam if closed
+def capture_frames():
+    """
+    Continuously captures frames from the webcam.
+    """
+    global cap, latest_frame, stop_thread, lock
+    while not stop_thread:
+        ret, frame = cap.read()
+        if ret:
+            with lock:
+                latest_frame = frame
+        time.sleep(0.1)  # Capture every 100ms for smooth real-time view
 
-    # Capture a single frame
-    ret, frame = cap.read()
-    if not ret:
-        raise RuntimeError("Failed to capture image from webcam.")
+def get_real_time_view():
+    """
+    Returns the latest frame for real-time view.
+    """
+    global latest_frame, lock
+    with lock:
+        if latest_frame is None:
+            return None
+        frame = latest_frame.copy()
 
-    print("Frame captured successfully!")
+    # Convert BGR to RGB for display
+    return cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+def process_frame():
+    """
+    Processes the latest captured frame and adds bounding boxes.
+    """
+    global latest_frame, lock
+    with lock:
+        if latest_frame is None:
+            return None
+        frame = latest_frame.copy()
 
     # Perform object detection
     results = model.predict(source=frame, imgsz=640, conf=0.5)
@@ -33,33 +59,39 @@ def capture_and_classify():
             label = f"{class_labels[int(cls)]} ({conf:.2f})"
             x1, y1, x2, y2 = map(int, (x1, y1, x2, y2))
 
-            # Debug: Print the bounding box info
-            print(f"Bounding Box: {x1, y1, x2, y2}, Label: {label}, Confidence: {conf:.2f}")
-
             # Draw bounding box and label
             cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
             cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-    else:
-        print("No detections.")
 
-    # Convert BGR to RGB for display
+    # Convert BGR to RGB for Gradio
     return cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-@atexit.register
-def cleanup():
-    if cap.isOpened():
-        cap.release()
-    print("Webcam released and resources cleaned up.")
+# Start the frame capture thread
+thread = threading.Thread(target=capture_frames, daemon=True)
+thread.start()
 
 # Gradio Interface
 interface = gr.Interface(
-    fn=capture_and_classify,
+    fn=lambda: (get_real_time_view(), process_frame()),
     inputs=None,
-    outputs=gr.Image(type="numpy"),
-    live=False,
-    title="Periodic Waste Classification",
-    description="Click the button to capture an image from your webcam and classify it."
+    outputs=[
+        gr.Image(type="numpy", label="Real-Time Camera View"),
+        gr.Image(type="numpy", label="Processed Detection View"),
+    ],
+    live=True,  # Automatically update both views
+    title="Real-Time Waste Classification",
+    description="Left: Real-time camera view. Right: Processed frames with bounding boxes updated every 5 seconds."
 )
+
+# Ensure the webcam is released when the script exits
+import atexit
+@atexit.register
+def cleanup():
+    global stop_thread, cap
+    stop_thread = True
+    if cap.isOpened():
+        cap.release()
+    print("Webcam released and resources cleaned up.")
 
 if __name__ == "__main__":
     interface.launch()
